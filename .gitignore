@@ -1,0 +1,22 @@
+# Byte-compiled / optimized / compiled files
+__pycache__/
+*.pyc
+*.pyd
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# Editor/IDE specific files
+.vscode/
+.idea/
+
+# Test-related files
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Miscellaneous
+*.log
+*.sqlite3

@@ -11,7 +11,7 @@ async def get_requirements(_: Settings = Depends(get_settings)):
 # GET /sign-in -> 200 OK + empty JSON
 @router.get("/sign-in", tags=["auth"])
 async def get_sign_in(_: Settings = Depends(get_settings)):
-    return {}
+    return { "status": "OK", "message": "Hello"}
 
 # POST /sign-out -> 204 No Content (no body)
 @router.post("/sign-out", status_code=status.HTTP_204_NO_CONTENT, tags=["auth"])

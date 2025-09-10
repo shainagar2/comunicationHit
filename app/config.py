@@ -8,6 +8,7 @@ class Settings:
     app_name: str = os.getenv("APP_NAME", "TinyFastAPI")
     scratch_value: str = os.getenv("SCRATCH_VALUE", "not-important")
     debug: bool = os.getenv("DEBUG", "false").lower() == "true"
+    db_connection_string: str = os.getenv("DB_CONN", "mydbconnectionstring")
 
 @lru_cache
 def get_settings() -> Settings:

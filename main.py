@@ -54,3 +54,14 @@ app = create_app()
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)
+
+    # main.py
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000", "http://127.0.0.1:5173"],  # לפי הפרונט
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+

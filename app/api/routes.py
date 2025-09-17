@@ -15,6 +15,7 @@ from app.models import (
 from app.security import (
     hash_password, verify_password, validate_password_policy, make_reset_token_pair
 )
+from app.mailer import send_reset_email   # ← חדש: שליחת מייל
 
 router = APIRouter()
 
@@ -34,7 +35,7 @@ class SignInIn(BaseModel):
     password: str
 
 class ChangePswdIn(BaseModel):
-    username: str                 # בדמו: מזהים לפי username (בפרודקשן: מזהה לפי session/JWT)
+    username: str
     current_password: str
     new_password: str
 
@@ -43,18 +44,17 @@ class ForgotIn(BaseModel):
     email: EmailStr | None = None
 
 class ResetIn(BaseModel):
-    token: str                    # ה-token שהמשתמש קיבל (raw)
+    token: str
     new_password: str
 
 class CustomerIn(BaseModel):
     full_name: str
     sector: str | None = None
     package: str | None = None
-    notes: str | None = None      # לשימוש בהדגמת Stored XSS (במצב פרוץ)
+    notes: str | None = None
 
 # ---------- Helpers ----------
 def _password_reused(db: Session, user_id: int, candidate_password: str, take_last_n: int) -> bool:
-    """בודק אם הסיסמה החדשה שווה לאחת מ-N האחרונות (השוואה מול היסטוריה)."""
     last: List[PasswordHistory] = (
         db.query(PasswordHistory)
           .filter(PasswordHistory.user_id == user_id)
@@ -68,7 +68,6 @@ def _password_reused(db: Session, user_id: int, candidate_password: str, take_la
     return False
 
 def _append_password_history(db: Session, user_id: int, pswd_hash: str, salt_hex: str, keep_last_n: int):
-    """מוסיף רשומת היסטוריה ומקפיד להשאיר רק N אחרונות (מוחק ישנות)."""
     ph = PasswordHistory(user_id=user_id, pswd_hash=pswd_hash, salt=salt_hex)
     db.add(ph)
     db.flush()
@@ -83,7 +82,6 @@ def _append_password_history(db: Session, user_id: int, pswd_hash: str, salt_hex
             db.delete(row)
 
 def _require_mode(cfg: Settings, expected_vuln: bool):
-    """מאפשר/חוסם גישה לפי המצב (VULN_MODE)."""
     if cfg.vuln_mode != expected_vuln:
         raise HTTPException(status_code=404, detail="Not available in this mode")
 
@@ -147,9 +145,10 @@ def change_pswd(data: ChangePswdIn, cfg: Settings = Depends(get_settings), db: S
     db.commit()
     return {"status": "OK"}
 
-# ---------- Forgot Password ----------
+# ---------- Forgot Password (שליחת מייל אמיתית) ----------
 @router.post("/forgot-password", tags=["auth"])
 def forgot_password(data: ForgotIn, db: Session = Depends(get_db)):
+    # אחד מהשדות חובה: username או email
     if not data.username and not data.email:
         raise HTTPException(status_code=400, detail="Provide username or email")
 
@@ -161,13 +160,27 @@ def forgot_password(data: ForgotIn, db: Session = Depends(get_db)):
 
     u = q.first()
     if not u:
+        # בפרודקשן נהוג להחזיר 200 כדי לא לחשוף קיום משתמש; בדמו נשאיר 404
         raise HTTPException(status_code=404, detail="User not found")
 
+    # יצירת זוג (raw token, sha1(token))
     raw, sha1h = make_reset_token_pair()
+
+    # מוחקים טוקנים ישנים ומשאירים אחד פעיל
     db.query(PasswordReset).filter(PasswordReset.user_id == u.id).delete()
+
+    # שומרים ב-DB רק SHA-1
     db.add(PasswordReset(user_id=u.id, token_sha1=sha1h))
     db.commit()
-    return {"status": "OK", "reset_token": raw, "note": "In production this token would be sent via email"}
+
+    # שליחת מייל אמיתית למשתמש עם הטוקן הגלמי
+    try:
+        send_reset_email(u.email, raw)
+    except Exception as e:
+        # כדי לא "לשרוף" מידע ניתן להחזיר 200; כאן נחזיר שגיאה לדיבוג
+        raise HTTPException(status_code=500, detail=f"Email send failed: {e}")
+
+    return {"status": "OK", "message": "Reset token sent to email"}
 
 # ---------- Reset Password ----------
 @router.post("/reset-password", tags=["auth"])
@@ -213,18 +226,22 @@ def create_customer(payload: CustomerIn, db: Session = Depends(get_db),
     return {"id": c.id}
 
 @router.get("/get-customers", tags=["records"])
-def get_customers(db: Session = Depends(get_db),
-                  user_id: int = Query(1, description="Temp: ID of current user")):
-    q = (
+def get_customers(
+    db: Session = Depends(get_db),
+    user_id: int = Query(1, description="Temp: ID of current user"),
+    q: str | None = Query(None, description="optional name filter")
+):
+    qset = (
         db.query(Customer)
           .join(UserCustomer, Customer.id == UserCustomer.customer_id)
           .filter(UserCustomer.user_id == user_id)
-          .order_by(Customer.id.desc())
     )
-    rows = q.all()
+    if q:
+        qset = qset.filter(Customer.full_name.ilike(f"%{q}%"))
+
+    rows = qset.order_by(Customer.id.desc()).all()
     return [
-        {"id": r.id, "full_name": r.full_name, "sector": r.sector,
-         "package": r.package_name, "notes": r.notes}
+        {"id": r.id, "full_name": r.full_name, "sector": r.sector, "package": r.package_name, "notes": r.notes}
         for r in rows
     ]
 
@@ -253,7 +270,7 @@ def list_customers_html_vuln(cfg: Settings = Depends(get_settings), db: Session 
     rows = db.execute(text("SELECT full_name, notes FROM customers ORDER BY id DESC LIMIT 50")).fetchall()
     html = "<h3>Customers (VULN)</h3><ul>"
     for name, notes in rows:
-        html += f"<li><b>{name}</b> — notes: {notes or ''}</li>"  # לא מקודד! בכוונה
+        html += f"<li><b>{name}</b> — notes: {notes or ''}</li>"
     html += "</ul>"
     return html
 
